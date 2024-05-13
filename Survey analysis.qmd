@@ -1,0 +1,1405 @@
+---
+title: "Final Assignment - Survey Methodology II"
+author: "Ana Pérez, Fernanda Martín, Laura Martínez"
+date: "`r Sys.Date()`"
+format: html
+editor: visual
+---
+
+```{=html}
+<style>
+body {
+text-align: justify}
+</style>
+```
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=T, message=FALSE, warning=FALSE, knitr.purl.inline = TRUE)
+```
+
+# Final Assignment: Discrimination in the EU
+
+The Special Eurobarometer 493: Discrimination in the EU focuses on person’s perceptions, attitudes and opinions of discrimination based on ethnic origin, skin colour, sexual orientation, gender, age, disability, religion, and beliefs. The survey you’re referring to was conducted across 28 countries.
+
+Fieldwork: 09- **21/05/2019.**
+
+1.  **Explaining Cross-Country Differences in Support Levels:** This aspect involves analyzing the data to understand why different countries exhibit varying levels of support for transgender individuals obtaining official documents (qc19 in the questionnare). Individual-level indicators need to be complemented with country-level factors such as cultural norms, legal systems, history, economic-related variables, and societal views on LGBTI rights.
+
+```{r, include=FALSE}
+library(caret)
+library(cowplot)
+library(dplyr)
+library(gmodels)
+library(ggplot2)
+library(ggcorrplot)
+library(haven)
+library(knitr)
+library(mice) #NA imputation
+library(plm)
+library(plotly)
+library(randomForest)
+library(readr)
+library(rgho) 
+library(tidyverse)
+library(tidyr)
+library(WDI) # API World Bank
+
+library(eurostat)
+library(sf)
+library(leaflet)
+library(glue)
+
+#Clustering
+library(cluster)
+library(mclust)
+library(klaR)
+library(factoextra)
+library(ggplot2)
+library(factoextra)
+```
+
+```{r}
+ZA7575 <- read_dta("./Data/ZA7575.dta")
+```
+
+## Selection of variables
+
+```{r}
+df <- ZA7575 |> dplyr::select(serialid,isocntry, d70,d71_1,d71_2,d71_3,d72_1,d72_2,polintr, d11,d10,d25,d1,d63,d8, sd2_1,sd2_2,sd2_3,sd2_4,sd2_5,sd2_6,sd2_7,sd2_8,qc5_1,qc5_2, qc5_3,qc5_4, qc7,qc15_1,qc15_2, qc15_3,qc17_3,qc17_4,qc17_5,qc19,qc20, d15a,d43b,sd3,qc1_4,qc1_8,qc1_10) 
+
+#renaming the columns
+df <- df |> rename(COUNTRY=isocntry,lifesat=d70,natmat=d71_1, eumat=d71_2,locmat=d71_3,euvoice=d72_1, natvoice=d72_2,age=d11,gender=d10,community=d25,ideo=d1,class=d63,eduyears=d8,ethnic_min=sd2_1, skin_min=sd2_2,relig_min=sd2_3, roma_min=sd2_4, sex_min=sd2_5,disab_min=sd2_6,other_min=sd2_7, none_min=sd2_8,oncontent=qc5_1,pubdef=qc5_2,campaign=qc5_3,workplace=qc5_4,fightdisc=qc7,suprights=qc15_1, suprelation=qc15_2,supmarriage=qc15_3,schsexor=qc17_3,schtrans=qc17_4,schinter=qc17_5,policy_id=qc19, policy_sex=qc20,occup=d15a,phone=d43b,religion=sd3, sexdiscr=qc1_4,transdiscr=qc1_8, interdiscr=qc1_10)
+```
+
+## Data Pre-processing: missing data
+
+Everything that is REFUSAL, SPONTANEUS answers, or DON'T KNOW, is categorized as NA (missing value)
+
+```{r}
+#life satisfaction
+df$lifesat <- ifelse(df$lifesat > 4, NA, df$lifesat)
+
+#D71: When you get together with friends or relatives, would you say you discuss frequently,occasionally or never about..? national, european or local matters: 4 is DK 
+df$natmat <- ifelse(df$natmat > 3, NA, df$natmat)
+df$eumat <- ifelse(df$eumat > 3, NA, df$eumat)
+df$locmat <- ifelse(df$locmat > 3, NA, df$locmat)
+
+#General political interest (D71 summarized): 4 is DK
+df$polintr <- ifelse(df$polintr > 3, NA, df$polintr)
+
+#Please tell me to what extent you agree or disagree with each of the following statements: my voice counts in the EU and in MY COUNTRY: more than 4 is refusal or DK.
+df$euvoice <- ifelse(df$euvoice > 4, NA, df$euvoice)
+df$natvoice <- ifelse(df$natvoice > 4, NA, df$natvoice)
+
+#Age
+df <- df |>mutate(age_rec = cut(age, breaks = c(0, 19, 29, 44, 64, 103),
+                  labels = c("<20", "20-29", "30-44", "45-64", ">=65")))
+
+#Gender (1=male, 0=woman)
+df$gender[df$gender == 2] <- 0
+
+#Type of community: 4 is DK
+df$community <- ifelse(df$community > 3, NA, df$community)
+
+#ideology left-right: more than 10 is refusal and DK
+df$ideo <- ifelse(df$ideo > 10, NA, df$ideo)
+
+#social class: more than 5 is sponteneous or DK
+df$class <- ifelse(df$class >5, NA, df$class)
+
+#In the last 12 months have you done any of the following: more than 2 is DK
+df$oncontent <- ifelse(df$oncontent > 2, NA, df$oncontent)
+df$pubdef <- ifelse(df$pubdef > 2, NA, df$pubdef)
+df$campaign <- ifelse(df$campaign > 2, NA, df$campaign)
+df$workplace <- ifelse(df$workplace > 2, NA, df$workplace)
+
+#Using a scale from 1 to 10, please tell me if the efforts made in (OUR COUNTRY) to #fight all forms of discrimination are effective. ‘1’ means you consider that these
+#efforts are "not at all effective", and ‘10’ that these efforts are "very effective".#11 means that no efforts are made
+df$fightdisc <- ifelse(df$fightdisc > 11, NA, df$fightdisc)
+
+#To what extent do you agree or disagree with each of the following statements? Support for lgtbi rights, relationships and marriage: more than 4 is DK
+df$suprights <- ifelse(df$suprights > 4, NA, df$suprights)
+df$suprelation <- ifelse(df$suprelation > 4, NA, df$suprelation)
+df$supmarriage <- ifelse(df$supmarriage > 4, NA, df$supmarriage)
+
+#School lessons and material should include information about diversity in terms of: sexual orientation, transgender, intersexual. More than 4 is DK
+df$schsexor <- ifelse(df$schsexor > 4, NA, df$schsexor)
+df$schtrans <- ifelse(df$schtrans > 4, NA, df$schtrans)
+df$schinter <- ifelse(df$schinter > 4, NA, df$schinter)
+
+#QC19: Do you think that transgender persons should be able to change their civil documents to match their inner gender identity? 3 is DK. 
+df$policy_id <- ifelse(df$policy_id >2, NA, df$policy_id)
+df$policy_id[df$policy_id == 2] <- 0
+
+#QC20: Do you believe that official documents, like passports and birth certificates, should have a third option,  beside male (M) and female (F). 
+df$policy_sex <- ifelse(df$policy_sex >2, NA, df$policy_sex)
+df$policy_sex[df$policy_sex == 2] <- 0
+
+#Do you own a personal mobile phone? (1=yes, 0=no)
+df$phone[df$phone == 2] <- 0
+
+#Religion denomination: more than 14 is DK
+df$religion <- ifelse(df$religion > 14, NA, df$religion)
+
+#Is Discrimination on the basis of… very widespread, fairly widespread, fairly rare or very rare in (OUR COUNTRY)?
+df$sexdiscr <- ifelse(df$sexdiscr >5, NA, df$sexdiscr)
+df$transdiscr <- ifelse(df$transdiscr >5, NA, df$transdiscr)
+df$interdiscr <- ifelse(df$interdiscr >5, NA, df$interdiscr)
+```
+
+```{r}
+sapply(df, function(x) sum(is.na(x))*100/nrow(df)) 
+```
+
+After checking the percentage of NA, we decided to get rid of the variables with more than 10% of NA (polintr, transdiscr, interdiscr, and policy_sex). The variable *ideo* (ideology) has a 17% of missing values. However, we considered it relevant to understand people's attitudes towards the target variable.
+
+Additionally, there are other variables that we considered less relevant for the analysis. For instance, life satisfaction (lifesat); whether they discuss frequently about European, national or local matters (eumat, natmat, and locmat); whether they think their voice counts in Europe or in their country (euvoice and natvoice); whether they support LGTBI relationships and marriage (only the variable for support towards LGTBI rights is included); whether they think school lessons should include information about diversity in terms of inter-sexualism (we only include whether school lessons should talk about sexual orientation and transsexualismm).
+
+Finally, we also decided to remove other variables that were initially selected to simplify our model: fightdisc,-sexdiscr, -ethnic_min,-skin_min,-relig_min,-roma_min,-sex_min,-disab_min,-other_min.
+
+```{r}
+df <- df |> dplyr::select(-polintr,-policy_sex,-transdiscr,-interdiscr,-lifesat,-eumat,-natmat,-locmat,-euvoice,-natvoice, -suprelation,-supmarriage,-schinter,-eduyears,-fightdisc,-sexdiscr, -ethnic_min,-skin_min,-relig_min,-roma_min,-sex_min,-disab_min,-other_min)
+```
+
+**Independent Variables: individual socio-demographics**
+
+Therefore, the final selection of individual indicators for our model includes the following variables:
+
+-   Age (numeric)
+
+-   Age_rec: \<20", "20-29", "30-44", "45-64", "\>=65"
+
+-   Gender: 1=man, 0=woman
+
+-   Community: type of community (1= rural area, 2=small or midle size town, 3=large town)
+
+-   Ideo: ideology (left-right placement)
+
+-   Class: social class (self-assessment, 5 categories)
+
+-   Occupation: type of occupation
+
+-   Phone do you own a personal mobile phone? (1=yes, 0=no)
+
+-   Religion: do you consider yourself to be? (religious denomination)
+
+-   Oncontent: You have shared content on online social networks about incidents of discriminatory treatment (yes=1, 0=no).
+
+-   Pubdef: You have publicly defended someone who was victim of discrimination (yes=1, 0=no).
+
+-   Workplace: You have publicly raised the issue of discrimination in the workplace (yes=1, 0=no).
+
+-   Campaign: You have joined an association or campaign that defends people against discrimination (yes=1, 0=no).
+
+-   None minority: Where you live, do you consider yourself to be a none minority? (yes=1, 0=no).
+
+-   Suprights: Gay, lesbian and bisexual people should have the same rights as heterosexual people (1= Totally agree \[...\] 4=Totally disagree)
+
+-   Schsex: School lessons and material should include information about diversity in terms of sexual orientation (1= Totally agree \[...\] 4=Totally disagree)
+
+-   Schtrans: School lessons and material should include information about diversity in terms of being transgender (1= Totally agree \[...\] 4=Totally disagree)
+
+## Data Pre-processing: country-level indicators
+
+In the following section, we use *The World Bank* API to import country-level indicators into our main dataset. The purpose of this part is to complement individual features with aggregated information of the country level.
+
+```{r}
+##WDIsearch("poverty")
+unique(df$COUNTRY)
+```
+
+Before adding the country-level indicators, we realized that Germany was divided between West and East (DE-W and DE-E). However, The World Bank does not make this distinction. We will first make a small recodification to make sure the merge with the country-level indicators is processed correctly.
+
+```{r}
+df<- df %>% mutate(COUNTRY = case_when(
+    COUNTRY %in% c("DE-E", "DE-W") ~ "DE",
+    TRUE ~ COUNTRY))
+unique(df$COUNTRY)
+```
+
+The following country-level indicators are merged into our final dataframe:
+
+-   GDP per capita (constant 2015 US\$)
+
+-   Political Stability and Absence of Violence/Terrorism: Estimate
+
+-   Unemployment, total (% of total labor force)
+
+-   Gini Index
+
+-   Life expectancy at birth, total (years)
+
+-   Government Expenditure on Education (% GDP)
+
+```{r}
+## GDP per capita (constant 2015 US$)
+var = WDI(indicator='NY.GDP.PCAP.KD', country="all", extra=TRUE, latest=5) %>%
+  mutate(GDP=NY.GDP.PCAP.KD, COUNTRY=iso2c) %>% 
+  group_by(COUNTRY) %>% 
+  filter(year=="2019") |> 
+ dplyr::select(COUNTRY, GDP) 
+
+df = merge(df, var, by="COUNTRY",  all.x = TRUE)
+
+##Political Stability and Absence of Violence/Terrorism: Estimate
+var = WDI(indicator='PV.EST', country="all", extra=TRUE, latest=5) %>%
+  mutate(Stability=PV.EST, COUNTRY=iso2c) %>% 
+  group_by(COUNTRY) %>% 
+  filter(year==2019) %>% 
+  dplyr::select(COUNTRY, Stability) 
+df= merge(df, var, by="COUNTRY", all.x = TRUE)
+
+##Unemployment, total (% of total labor force)
+var = WDI(indicator='SL.UEM.TOTL.ZS', country="all", extra=TRUE, latest=5) %>%
+  mutate(Unemployment=SL.UEM.TOTL.ZS, COUNTRY=iso2c) %>% 
+  group_by(COUNTRY) %>% 
+  filter(year==2019) %>% 
+  dplyr::select(COUNTRY, Unemployment) 
+df = merge(df, var, by="COUNTRY", all.x = TRUE)
+
+##Gini index
+var = WDI(indicator='SI.POV.GINI', country="all", extra=TRUE, latest=5) %>%
+  mutate(Gini=SI.POV.GINI, COUNTRY=iso2c) %>% 
+  group_by(COUNTRY) %>% 
+  filter(year==2019) %>% 
+  dplyr::select(COUNTRY, Gini) 
+
+df = merge(df, var, by="COUNTRY", all.x = TRUE)
+
+## Life expectancy at birth, total (years)
+var = WDI(indicator='SP.DYN.LE00.IN', country="all", extra=TRUE, latest=5) %>%
+  mutate(lifexp=SP.DYN.LE00.IN , COUNTRY=iso2c) %>% 
+  group_by(COUNTRY) %>% 
+  filter(year==2019) %>% 
+  dplyr::select(COUNTRY, lifexp) 
+
+df= merge(df, var, by="COUNTRY", all.x = TRUE)
+
+##Government Expenditure on Education  (% GDP)
+var = WDI(indicator= 'SE.XPD.TOTL.GD.ZS', country="all", extra=TRUE, latest=5) %>%
+  mutate(edexp= SE.XPD.TOTL.GD.ZS, COUNTRY=iso2c) %>% 
+  group_by(COUNTRY) %>% 
+  filter(year==2019) %>% 
+  dplyr::select(COUNTRY, edexp) 
+
+df= merge(df, var, by="COUNTRY", all.x = TRUE)
+```
+
+### NA imputation
+
+```{r}
+sapply(df, function(x) sum(is.na(x))*100/nrow(df))
+```
+
+```{r}
+library(labelled)
+
+# Remove labels from labelled variables
+df$age <- zap_labels(df$age)
+df$gender <- zap_labels(df$gender)
+df$none_min <- zap_labels(df$none_min)
+df$occup <- zap_labels(df$occup)
+df$phone <- zap_labels(df$phone)
+```
+
+```{r}
+data_imputed <- data.frame(idno=df$serialid,
+  original =df$ideo,
+  imputed_median =replace(df$ideo, is.na(df$ideo), median (df$ideo, na.rm=TRUE)),
+  imputed_pmm = complete(mice(df, m=5, method = "pmm", seed=123))$ideo,
+  imputed_normboot = complete(mice(df, m=5, method = "norm.boot", seed=123))$ideo,
+  imputed_rf = complete(mice(df, m=5, method = "rf", seed=123))$ideo
+)
+
+head(data_imputed, 10)
+```
+
+```{r}
+# Define variables, titles, and colors for the updated set of distributions
+variables <- c("original", "imputed_median", "imputed_pmm", "imputed_normboot", "imputed_rf")
+titles <- c("Distribution of the original variable", "median-imputed distribution", "PMM-imputed distribution", "Normboot-imputed distribution", "Rf-imputed distribution")
+colors_fill <- c("skyblue", "#15ad4f", "#6a6ad9", "#e65100", "pink")
+colors_border <- c("skyblue3", "#808080", "#808080", "#808080", "#808080")
+
+# Initialize an empty plot list for the new plots
+plots <- list()
+
+# Loop through the updated variables to create plots
+for (i in 1:length(variables)) {
+  plots[[i]] <- ggplot(data_imputed, aes(x = .data[[variables[i]]])) +
+    geom_histogram(binwidth = 1, fill = colors_fill[i], color = colors_border[i], position = "identity") +
+    ggtitle(titles[i]) +
+    theme_classic()
+}
+
+# Combine the new set of plots into a grid
+plot_grid(plotlist = plots, nrow = 2, ncol = 3)
+```
+
+Which are the most similar distributions produced by MICE methods? It looks that the Predictive mean matching (PMM) method is the best.
+
+Now we prepare the data for Mutliple Imputation. We will apply this method only to the variables that are numeric, avoiding the target variable and the factor variables, to which we will not apply any method.
+
+```{r}
+init=mice(df)
+meth =init$method
+
+meth[c("policy_id", "community","class", "religion")]=""
+
+meth[c("ideo", "oncontent", "pubdef", "campaign", "workplace", "suprights", "schsexor", "schtrans", "edexp")]="pmm"
+```
+
+```{r}
+imputed_pmm = mice(df, method=meth, m=5, seed=123)
+summary(imputed_pmm)
+
+
+df_imputed <- complete(imputed_pmm)
+sapply(df_imputed, function(x) sum(is.na(x))*100/nrow(df_imputed)) 
+df_final <- na.omit(df_imputed)
+```
+
+The nº of NA's has been considerably reduced using the PMM method from the MICE library
+
+## Descriptive analysis: Cross country differences in support levels
+
+**Target Variable (QC19):** Do you think that transgender persons should be able to change their civil documents to match their inner gender identity? (YES=1, 0=NO)
+
+```{r}
+table(df_final$policy_id)
+
+ggplot(df_final, aes(x = as.factor(policy_id))) +
+  geom_bar(na.rm = TRUE)
+```
+
+Also to understand if we later need to balance our data:
+
+```{r}
+# Calculate the percentage of each class
+class_percentage_0 <- mean(df_final$policy_id == 0) * 100
+class_percentage_1 <- mean(df_final$policy_id == 1) * 100
+
+# Print the percentages
+cat("Percentage of class 0:", class_percentage_0, "%\n")
+cat("Percentage of class 1:", class_percentage_1, "%\n")
+
+```
+
+With the minority class being 39.75%, we don't consider that the data is heavily imbalanced. Therefore, we will not apply any method for balancing the data.
+
+### Heatmap
+
+```{r}
+# Group by country and calculate the total number of people in each country
+total <- df_final |> 
+  group_by(COUNTRY) |> 
+  summarize(total_people = n())
+
+#Then calculate the people who either support or not
+prop1<- df_final %>%
+  filter(policy_id == 1) |> 
+  group_by(COUNTRY) |> 
+  summarize(yes = n())
+
+prop0<- df_final |> 
+  filter(policy_id == 0) |> 
+  group_by(COUNTRY) |> 
+  summarize(no = n())
+
+# Merge the data frames 
+combined <- merge(total, prop1, by = "COUNTRY", all.x = TRUE)
+heatmap <- merge(combined, prop0, by = "COUNTRY", all.x = TRUE)
+
+#Calculate the percentage of people saying yes and no
+heatmap$prop_yes <- (heatmap$yes/ heatmap$total) * 100
+heatmap$prop_no <- (heatmap$no/ heatmap$total) * 100
+```
+
+```{r fig.height=10, fig.width=10}
+heatmap <- heatmap |> dplyr::select(-total_people,-yes,-no)
+heatmap <- heatmap[order(-heatmap$prop_yes), ]
+column_labels <- c("Yes", "No")
+
+# Create a matrix from the 'prop_yes' and 'prop_no' columns
+heatmap_matrix <- as.matrix(heatmap[, c("prop_yes", "prop_no")])
+
+# Set row names to 'COUNTRY'
+rownames(heatmap_matrix) <- heatmap$COUNTRY
+
+# Display the heatmap
+heatmap(heatmap_matrix, 
+        Colv = NA, 
+        Rowv = NA, 
+        scale = "column", 
+        labRow = heatmap$COUNTRY,
+        main = "Proportions of Support for the Dependent Variable, by country",
+        xlab = "",
+        ylab = "Country", 
+        labCol =column_labels, 
+        cexCol = 1)
+```
+
+### Map representation
+
+```{r}
+eu_shp <- get_eurostat_geospatial(resolution = 10, 
+                                 nuts_level = 0, 
+                                 year = 2016)
+
+eu_shp <- st_transform(eu_shp, crs = 4326)
+
+eu_shp <- eu_shp |> 
+  mutate(NUTS_ID = ifelse(NUTS_ID == "EL", "GR", 
+                          ifelse(NUTS_ID == "UK", "GB", NUTS_ID)))
+
+eu_shp <- eu_shp |> 
+  dplyr::select(NUTS_ID, geometry)
+
+eu_shp <- eu_shp |> 
+  rename(COUNTRY = NUTS_ID)
+
+europe_data <- left_join(eu_shp, heatmap, by = "COUNTRY")
+
+europe_data <- europe_data|> 
+   na.omit()
+
+```
+
+```{r}
+#min_max values
+europe_data <- mutate(europe_data, margin = abs(prop_yes - prop_no))
+min_max_values <- range(europe_data$margin, na.rm = TRUE)
+
+#Now we create the colour palette taking the lightest
+#colour the smallest number of the margin between votes
+
+no_palette <- colorNumeric(palette = "Reds", domain=c(min_max_values[1], min_max_values[2]))
+yes_palette <- colorNumeric(palette = "Blues", 
+                               domain=c(min_max_values[1], min_max_values[[2]]))
+
+
+# Making a winner column
+europe_data <- mutate(europe_data, winner = if_else(prop_yes > prop_no, "Yes", "No"))
+
+#Creating two different data frames
+yes_df <- europe_data[europe_data$winner == "Yes",]
+no_df <- europe_data[europe_data$winner == "No",]
+
+
+#Create a popup
+
+no_popup <- glue("<strong>{no_df$COUNTRY} COUNTRY</strong><br />
+                    <strong>winner: No</strong><br />
+                    No: {scales::comma(no_df$prop_no, accuracy = 1)}<br />
+                    Yes: {scales::comma(no_df$prop_yes, accuracy = 1)}<br />
+                    Margin: {scales::comma(no_df$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+yes_popup <- glue("<strong>{yes_df$COUNTRY} COUNTRY</strong><br />
+                      <strong>winner: Yes</strong><br />
+                      Yes: {scales::comma(yes_df$prop_yes, accuracy = 1)}<br />
+                      No: {scales::comma(yes_df$prop_no, accuracy = 1)}<br />
+                      Margin: {scales::comma(yes_df$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+
+#Set the background of the map
+
+leaflet() %>%
+  addProviderTiles("CartoDB.Positron")
+
+#Then we overlay the data
+leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(
+    data = no_df,
+    fillColor = ~no_palette(no_df$margin),
+    label = no_popup,
+    stroke = TRUE,
+    smoothFactor = 0.2,
+    fillOpacity = 0.8,
+    color = "#666",
+    weight = 1
+  ) %>%
+  addPolygons(
+    data = yes_df,
+    fillColor = ~yes_palette(yes_df$margin),
+    label = yes_popup,
+    stroke = TRUE,
+    smoothFactor = 0.2,
+    fillOpacity = 0.8,
+    color = "#666",
+    weight = 1
+  )
+```
+
+## Clustering
+
+```{r}
+df_numeric <- df_final |> dplyr::select(-serialid,-COUNTRY, -policy_id, -age_rec)
+names=df_final$COUNTRY
+```
+
+Given what the previous heatmap shows, we will assume an initial amount of 3 clusters as there are varying degrees of support for this policy. Specifically we can see on the map a group that is very in favour, one that is very against and one that is a bit more neutral.
+
+```{r}
+k = 3
+fit = kmeans(scale(df_numeric), centers=k, nstart=1000)
+groups = fit$cluster
+barplot(table(groups), col="blue")
+
+```
+
+We can see here 3 clusters of sizes 2700, 12446, and 7973, respectively.
+
+With the following graphs we might be able to better understand the centroids of each cluster:
+
+```{r}
+centers=fit$centers
+
+barplot(centers[1,], las=2, col="darkblue")
+barplot(centers[2,], las=2, col="darkblue")
+barplot(centers[3,], las=2, col="darkblue")
+
+```
+
+### Optimal number of clusters
+
+In the previous code we have chosen a random number of clusters given our intuition, but with different methods we can check what is the ideal number of clusters that should be created:
+
+```{r}
+library(factoextra)
+
+# First we need to group by country our data to avoid having overfitted representations
+df_grouped <- df_final %>%
+  group_by(COUNTRY) %>%
+  summarise(across(.cols = where(is.numeric), .fns = mean, na.rm = TRUE)) 
+
+X <- df_grouped[,-1] #remove country column
+```
+
+```{r}
+fviz_nbclust(scale(X), kmeans, method = 'wss', k.max = 20, nstart = 1000) 
+fviz_nbclust(scale(X), kmeans, method = 'silhouette', k.max = 20, nstart = 1000) 
+fviz_nbclust(scale(X), kmeans, method = 'gap_stat', k.max = 10, nstart = 100, nboot = 100) 
+```
+
+The gap_stat method suggest that the ideal number of clusters is 1 but the other two methods (wss and silhouette) suggest that the ideal number of clusters is 2 instead, which makes sense as they represent support for the policy = Yes vs No
+
+It might be better to visualize the **clusters by country**:
+
+```{r}
+set.seed(123)
+k <- 2
+fit <- kmeans(df_grouped[,-1], centers = k) 
+names <- df_grouped$COUNTRY
+
+# Visualización de clusters con etiquetas
+fviz_cluster(fit, data = X, geom = c("point"), ellipse.type = 'norm', pointsize = 1) +
+  theme_minimal() +
+  geom_text(aes(label = names), hjust = 0, vjust = 0, size = 2, check_overlap = F) +
+  scale_fill_brewer(palette = "Paired")
+
+```
+
+#### Add interpretation here and what we are doing next
+
+```{r}
+fit.km = kmeans(df_numeric, centers = 2, nstar = 1000) 
+```
+
+```{r}
+d = dist(scale(X), method = "euclidean") 
+hc <- hclust(d, method = "ward.D2")
+```
+
+### Classical dendrogram
+
+```{r}
+colors_2 <- c( "#b3204d", "#06d9b6")
+plot <- fviz_dend(hc, k = 2, color_labels_by_k = TRUE, cex = 0.8, repel = TRUE) +
+  labs(title = "Support for the Dependent Variable") +
+  theme(plot.background = element_rect(fill = "black", colour = "black"), 
+        panel.background = element_rect(fill = "black", colour = "black"), 
+        plot.title = element_text(color = "white"), 
+        axis.title = element_text(color = "white"), 
+        axis.text = element_text(color = "white"), 
+        legend.text = element_text(color = "white"),
+        legend.title = element_text(color = "white")) +
+  scale_color_manual(values = colors_2)
+
+plot + geom_segment(color = "white")
+```
+
+### Phylogenic tree
+
+```{r}
+hc$labels <- names
+
+colors <- c( "#b3204d", "#06d9b6")
+
+fviz_dend(hc, k = 2, color_labels_by_k = TRUE, cex = 0.8, type = "phylogenic", repel = TRUE) +
+  labs(title = "Support for the Dependent Variable") +
+   theme(axis.text.x=element_blank(),axis.text.y=element_blank()) +
+  scale_color_manual(values = colors)  
+
+
+```
+
+## Individual-level analysis
+
+Individual-level factors explaining cross-country differences in support levels for transgender individuals obtaining official documents (cq19)
+
+Let´s start with a correlation matrix of support for the policy with individual_level factors:
+
+```{r}
+correlation_matrix <- cor(df_final[c("policy_id", "age", "gender", "community", "ideo","suprights","class", "schtrans", "religion")], use = "complete.obs")
+
+
+# plot
+ggcorrplot(correlation_matrix, 
+           hc.order = TRUE, 
+           type = "lower", 
+           lab = TRUE, 
+           lab_size = 3, 
+           method = "circle", 
+           colors = c("blue", "white", "darkred"),
+           title = "Correlation Plot with Values")
+
+
+```
+
+We can see how the support for the policy is mostly related to ideology and religion, which makes complete sense as well as of course the upport for LGTBI rights
+
+Let´s dig a bit further into it and creatte some plots to visualize the support given certain factors:
+
+Before that let´s create a few datasets that aggregate the data by each variable to visualize this better:
+
+```{r}
+# Create a function to calculate proportions
+calculate_proportions <- function(data, variable) {
+  data %>%
+    group_by({{ variable }}) %>%
+    summarize(total_people = n(),
+              yes = sum(policy_id == 1),
+              no = sum(policy_id == 0)) %>%
+    mutate(prop_yes = (yes / total_people) * 100,
+           prop_no = (no / total_people) * 100)
+}
+
+# Apply the function to each individual-level variable
+data_age <- calculate_proportions(df_final, age_rec)
+data_gender <- calculate_proportions(df_final, gender)
+data_ideo <- calculate_proportions(df_final, ideo)
+data_class <- calculate_proportions(df_final, class)
+data_schtrans <- calculate_proportions(df_final, schtrans)
+data_religion <- calculate_proportions(df_final, religion)
+data_community <- calculate_proportions(df_final, community)
+```
+
+#### Age
+
+```{r}
+
+# Scatter plot of support levels vs. age
+data_age$age_rec <- factor(data_age$age_rec, levels = c("<20", "20-29", "30-44", "45-64", ">=65"))
+
+ggplot(data_age, aes(x = age_rec, y = prop_yes)) +
+  geom_point() +
+  labs(x = "Age", y = "Support Levels", title = "Relationship between Age and Support Levels")
+
+```
+
+We can see that with age support for the policy decreases, although the difference between the youngest and oldest generations is quite high.
+
+#### Gender
+
+```{r}
+# Subgroup analysis: Support levels by gender
+data_gender$gender <- factor(data_gender$gender, levels = c("0", "1"))
+ggplot(data_gender, aes(x = gender, y = prop_yes)) +
+  geom_point() +
+  labs(x = "Gender", y = "Support Levels", title = "Support Levels by Gender")
+
+# Statistical test: t-test for support levels by gender
+t_test <- t.test(policy_id ~ gender, data = df_final)
+print(t_test)
+
+```
+
+Regarding the test, based on the low p-value, we reject the null hypothesis and conclude that there is a statistically significant difference in support levels between the two gender groups. Additionally, the confidence interval provides a range of plausible values for the true difference in means, indicating the direction and magnitude of the difference.
+
+As we can see in the visualization by gender:
+
+-   mean in group 0 = 0.6305292
+
+-   mean in group 1= 0.5697707
+
+Men tend to support less this policy
+
+#### Ideology
+
+```{r}
+# Scatter plot of support levels vs. ideology
+data_ideo$ideo <- factor(data_ideo$ideo, levels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10"))
+
+ggplot(data_ideo, aes(x = ideo, y = prop_yes)) +
+  geom_point() +
+  labs(x = "Ideology", y = "Support Levels", title = "Relationship between Ideology and Support Levels")
+```
+
+-   Individuals with more left-leaning ideologies (1-3) have higher levels of support for LGTBIQ policies compared to those with more conservative ideologies.
+
+-   The proportion of individuals supporting LGTBIQ policies generally decreases as ideology becomes more conservative.
+
+-   Among individuals with more conservative ideologies (7-10), support for LGTBIQ policies is notably lower, with proportions of support ranging from 52.0% to 44.9%.
+
+Overall, the data suggest that ideology plays a significant role in shaping attitudes towards LGTBIQ policies, with individuals holding more left-leaning ideologies showing higher levels of support compared to those with more conservative ideologies
+
+#### Religion
+
+```{r}
+# Boxplot of support for the policy per religion category
+#Religion: 1=catholic, 2=Orthodox Christian, 3=Protestant, 4=Other christian, 5=Jewish, 6=Muslim-Shia, 7=Muslim-Sunny, 8=other muslim, 9=sikh, 10=buddhist, 11=hindu, 12=atheist, 13=agnostic, 14=other
+data_religion$religion <- factor(data_religion$religion, levels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14"))
+ggplot(data_religion, aes(x = factor(religion), y = prop_yes)) +
+  geom_point(fill = "lightblue") +
+  labs(x = "Religion", y = "Support for Policy", 
+       title = "Support for the Policy by Religion Category")
+
+```
+
+Some insights:
+
+-   Among Christian denominations, Protestants (Religion 3) and Catholics (Religion 1) exhibit the highest levels of support for LGTBIQ policies, with proportions of support reaching 69.9% and 57.2%, respectively in comparison to Orthodox (42.6%.)
+
+-   Atheists (Religion 12) and Agnostics (Religion 13) show the highest levels of support for LGTBIQ policies among all religious groups, with proportions of support reaching 73.2% and 72.5%, respectively.
+
+-   Buddhists (Religion 10), Sikhs (Religion 9) and Jewish (Religion 5) also demonstrate relatively high levels of support, with proportions of support at 66.1%, 61.1% and 75%, respectively.
+
+-   Muslims, both Shia (Religion 6) and Sunni (Religion 7), show lower levels of support compared to other non-Christian religions, with proportions of support at 55.9% and 45.8%, respectively.
+
+#### Class
+
+```{r}
+# Convert class to a factor with specific levels
+data_class$class <- factor(data_class$class)
+
+# Create a scatter plot of support levels vs. class
+ggplot(data_class, aes(x = class, y = prop_yes)) +
+  geom_point() +
+  labs(x = "Class", y = "Support Levels", title = "Relationship between Class and Support Levels")
+
+```
+
+The data suggest a positive association between socioeconomic status and support for LGTBIQ policies, with support increasing as socioeconomic status improves.
+
+#### Community
+
+```{r}
+# Scatter plot of support levels vs. type of community
+#1="small", 2="medium", 3="town"
+data_community$community <- factor(data_community$community)
+
+ggplot(data_community, aes(x = community, y = prop_yes)) +
+  geom_point() +
+  labs(x = "Community", y = "Support Levels", title = "Relationship between Age and Support Levels")
+```
+
+The output suggests that support levels are considerably lower in rural areas in comparison with small/medium and large tows. Highest percentage of support comes from small to medium towns.
+
+## Country-level analysis
+
+```{r}
+library(tidyr)
+country_data <- left_join(heatmap, df_final |> 
+                                  distinct(COUNTRY, GDP, Stability, Unemployment, Gini, lifexp, edexp), 
+                                by = "COUNTRY")
+
+```
+
+#### Correlation matrix
+
+```{r}
+
+correlation_matrix1 <- cor(country_data[, c("prop_yes", "GDP", "Stability", "Unemployment", "Gini","lifexp", "edexp")], use = "complete.obs")
+
+# plot
+ggcorrplot(correlation_matrix1, 
+           hc.order = TRUE, 
+           type = "lower", 
+           lab = TRUE, 
+           lab_size = 3, 
+           method = "circle", 
+           colors = c("blue", "white", "darkred"),
+           title = "Correlation Plot with Values")
+```
+
+-   **GDP** has a moderately strong positive correlation with **`prop_yes`** (0.604). This suggests that countries with higher GDP tend to have higher levels of support for LGTBIQ policies.
+
+-   **Stability** has a weak positive correlation with **`prop_yes`** (0.184). This indicates that countries with higher levels of political stability may have slightly higher levels of support for LGTBIQ policies.
+
+-   **Unemployment** has a weak positive correlation with **`prop_yes`** (0.187), suggesting that higher unemployment rates may be associated with slightly higher levels of support for LGTBIQ policies.
+
+-   **Gini** has a weak negative correlation with **`prop_yes`** (-0.110). This implies that countries with lower income inequality (lower Gini coefficient) may have slightly higher levels of support for LGTBIQ policies.
+
+#### Support levels by GDP
+
+```{r}
+ggplot(country_data, aes(x = GDP, y = prop_yes)) +
+  geom_point() +
+  labs(x = "GDP", y = "Support for Policy") +
+  ggtitle("Support for Policy vs GDP")
+```
+
+#### Support levels by Stability
+
+```{r}
+ggplot(country_data, aes(x = Stability, y = prop_yes)) +
+  geom_point() +
+  labs(x = "Stability", y = "Support for Policy") +
+  ggtitle("Support for Policy by Stability")
+```
+
+#### Support levels by Unemployment
+
+```{r}
+ggplot(country_data, aes(x = Unemployment, y = prop_yes)) +
+  geom_point() +
+  labs(x = "Unemployment", y = "Support for Policy") +
+  ggtitle("Support for Policy by Unemployment")
+```
+
+#### Support levels by GINI
+
+```{r}
+ggplot(country_data, aes(x = Gini, y = prop_yes)) +
+  geom_point() +
+  labs(x = "GINI", y = "Support for Policy") +
+  ggtitle("Support for Policy by GINI")
+```
+
+#### Support levels by life expectancy
+
+```{r}
+ggplot(country_data, aes(x = lifexp, y = prop_yes)) +
+  geom_point() +
+  labs(x = "Life Expectancy", y = "Support for Policy") +
+  ggtitle("Support for Policy by lifexp")
+```
+
+#### Support levels by education expenditure
+
+```{r}
+ggplot(country_data, aes(x = edexp, y = prop_yes)) +
+  geom_point() +
+  labs(x = "Education expenditure", y = "Support for Policy") +
+  ggtitle("Support for Policy by edexp")
+```
+
+#### Naive Logistic Regression model for country-level vars
+
+```{r}
+# Perform linear regression analysis
+
+df_final$policy_id <- factor(df_final$policy_id)
+
+logistic_model <- glm(policy_id ~ GDP + Stability+ I(Stability^2) + Unemployment + I(Unemployment^2) + Gini+ log(Gini)+ lifexp + edexp,
+                       data = df_final,
+                       family = binomial(link = "logit"))
+summary(logistic_model)
+```
+
+Overall, the model suggests that GDP, Unemployment, life expectancy, education expenditure, Gini, and the logarithm of Gini are significant predictors of the outcome, while Stability may not be statistically significant.
+
+## Multivariate analysis
+
+#### Removing non-significant variables
+
+```{r}
+
+#Convert some variables into factors
+df_final$class <- as.factor(df_final$class)
+df_final$religion <- as.factor(df_final$religion)
+df_final$gender <- as.factor(df_final$gender)
+str(df_final$policy_id)
+
+# Include interaction terms
+df_final$age_ideology <- df_final$age * df_final$ideo
+
+
+
+logit_model <- glm(policy_id ~ age + gender + ideo + class +none_min + oncontent + age_ideology + suprights + schsexor + schtrans + phone + religion + GDP+ I(GDP^2) +Stability+ I(Stability^2) + lifexp ,
+                  data = df_final,
+                  family = binomial())
+
+# Display the model's summary
+summary(logit_model)
+```
+
+The p-values associated with each coefficient indicate whether the estimated effect of the predictor variable is statistically significant. Predictors with p-values less than 0.05 are typically considered statistically significant. In the model, variables such as **`age`**, **`gender`**, **`ideo`**, **`suprights`**, **`schsexor`**, **`schtrans`**, **`phone`**, **`religion`**, **`GDP`**, **`I(GDP^2)`**, **`Stability`**, **`I(Stability^2)`**, and **`lifexp`** have statistically significant effects on the log odds of the policy being enacted.
+
+It stands out though that only class 5 (being part of the highest class) ad religions 2, 7, 12 and 13 have a significant impact on the log odds of the policy being enacted.
+
+In summary, both models indicate that several individual-level predictors are statistically significant in explaining support levels for the policy.Both models have similar AIC values, but the variables and coefficients differ, indicating different factors influencing the outcome variable in each model. Therefore, you may conclude that the individual-level predictors are robust across different countries, and the inclusion of country dummies do not significantly improve the model.
+
+### Final discussion: differences by country
+
+After having analysed the effect of many individual-level variables as well as country variables on the propensity to support the proposed LGTBQ policy, the following variables seemed to have a greater impact:
+
+1.  Age
+
+2.  Gender
+
+3.  Ideology
+
+4.  Class (5)
+
+5.  none_min (not considering yourself a minority)
+
+6.  Oncontent (sharing content on discrimination)
+
+7.  Suprights (lower support for lgtbi rights)
+
+8.  schsexor (dislike for school sex orientation)
+
+9.  schtrans (dislike for school trans education)
+
+10. Having a phone
+
+11. Religion (2, 7, 12 & 13)
+
+12. GDP
+
+13. Stability
+
+14. Life expectancy
+
+A visual reminder of the support levels by country:
+
+```{r}
+
+# Close all open graphics devices
+# dev.off()
+
+# Calculate average support
+average_support <- mean(europe_data$prop_yes)
+
+# Sort the data frame by prop_yes in decreasing order
+europe_data_sorted <- europe_data[order(-europe_data$prop_yes),]
+
+# Create the bar plot
+plot_ly(data = europe_data_sorted, x = ~reorder(COUNTRY, -prop_yes), y = ~prop_yes, type = "bar", marker = list(color = "royalblue3", line = list(color = "black"))) %>%
+  layout(title = "Proportion of 'Yes' by Country",
+         xaxis = list(title = "Country"),
+         yaxis = list(title = "Proportion of 'Yes'"),
+         bargap = 0.2) %>%
+  add_trace(x = ~reorder(COUNTRY, -prop_yes), 
+            y = rep(average_support, nrow(europe_data_sorted)),
+            type = "scatter", 
+            mode = "lines", 
+            line = list(color = "red"), 
+            name = "Average Support") %>%
+  layout(showlegend = TRUE)
+
+```
+
+So, once we have arrived to this conclusion, let´s take a step further and analyse the distributions/frequencies of each relevant variable by country to draw some conclusions over the differences by country that explain different support levels for the policy:
+
+#### Age
+
+```{r}
+age_by_country <- df_final |> 
+  group_by(COUNTRY) |> 
+  summarize(avg_age = mean(age)) |> 
+  arrange(desc(avg_age))
+
+overall_avg_age <- mean(age_by_country$avg_age)
+
+ggplot(age_by_country, aes(x = reorder(COUNTRY, -avg_age), y = avg_age)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  geom_hline(yintercept = overall_avg_age, color = "red", linewidth = 1) +
+  labs(title = "Average Age by Country", x = "Country", y = "Average Age") +
+  theme_minimal()
+```
+
+By age we can´t really clearly differenciate the two previous groups as the countries that have higher propensity to support the policy are around the center of the average age distribution. Anyways the effect of the coefficient of this variable is quite small (-9.646e-03).
+
+#### Gender
+
+```{r}
+# Calculate the count of gender by country and calculate proportion
+gender_by_country <- df_final %>%
+  group_by(COUNTRY, gender) %>%
+  summarize(count = n()) %>%
+  mutate(prop = count / sum(count))
+
+# Filter to include only gender 1 for each country
+gender_by_country_gender1 <- gender_by_country %>%
+  filter(gender == "1")
+
+# Arrange the dataframe by descending proportion of gender 1
+gender_by_country_gender1 <- gender_by_country_gender1 %>%
+  arrange(desc(prop))
+
+# Reorder countries by proportion of gender 1
+country_order <- gender_by_country_gender1$COUNTRY
+
+# Plotting
+ggplot(gender_by_country, aes(x = factor(COUNTRY, levels = country_order), y = prop, fill = factor(gender))) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(title = "Proportion of Gender by Country", x = "Country", y = "Proportion", fill = "Gender") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+```
+
+Sort of the same thing happens with the age variable as the countries that tend to support the least this policy are around the center of the distribution.
+
+#### Ideology
+
+```{r}
+# Average ideology by country
+ideology_by_country <- df_final %>%
+  group_by(COUNTRY) %>%
+  summarize(avg_ideology = mean(ideo)) |> 
+  arrange(desc(avg_ideology))
+
+ggplot(ideology_by_country, aes(x = reorder(COUNTRY, -avg_ideology), y = avg_ideology, fill = avg_ideology > 5)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("red", "blue")) +  
+  labs(title = "Average Ideology by Country", x = "Country", y = "Average Ideology") +
+  theme_minimal()
+```
+
+Ideology nonetheless seem to match those countries that tend to support more and less the studied policy:
+
+The most conservative countries(in average) are the ones that oppose more this policy, in comparison to the more leftist ones.
+
+On top of that the coefficient for this variable is very significant and seems to have a stronger impact than the previous ones (-1.325e-01).
+
+#### Class
+
+```{r}
+class_share_by_country <- df_final %>%
+  group_by(COUNTRY) %>%
+  summarize(class5_share = mean(class == 5)) |> 
+  arrange(desc(class5_share))
+
+ggplot(class_share_by_country, aes(x = reorder(COUNTRY, -class5_share), y = class5_share)) +
+  geom_bar(stat = "identity", fill = "orange") +
+  labs(title = "Share of Class 5 by Country", x = "Country", y = "Share of Class 5") +
+  theme_minimal()
+```
+
+Looking at the share of people that assess themselves to be of "high class", the Netherlands stands out for being the country with the highest share and is precisely also one of the countries in which its citizens have the highest propensity to support the policy.
+
+#### Considered a minority
+
+```{r}
+none_min_by_country <- df_final |> 
+  group_by(COUNTRY) |> 
+  summarize(none_min_prop = mean(none_min)) |> 
+  arrange(desc(none_min_prop))
+
+overall_avg_min <- mean(none_min_by_country$none_min_prop)
+
+ggplot(none_min_by_country, aes(x = reorder(COUNTRY, -none_min_prop), y = none_min_prop)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  geom_hline(yintercept = overall_avg_min, color = "red", size = 1) +
+  labs(title = "Proportion of none_min by Country", x = "Country", y = "Proportion of none_min") +
+  theme_minimal()
+```
+
+Those countries that tend to support the most this policy as well are those in which we can find the greatest share of people who consider themselves to be part of a minority. This result is consistent with the coefficient found on the previous multivariate regression (2.075e-01)
+
+#### Shared content
+
+```{r}
+oncontent_by_country <- df_final |> 
+  group_by(COUNTRY) |> 
+  summarize(oncontent_prop = mean(oncontent))|> 
+  arrange(desc(oncontent_prop))
+
+overall_avg_con <- mean(oncontent_by_country$oncontent_prop)
+
+ggplot(oncontent_by_country, aes(x = reorder(COUNTRY, -oncontent_prop), y = oncontent_prop)) +
+  geom_bar(stat = "identity", fill = "pink") +
+  geom_hline(yintercept = overall_avg_con, color = "red", size = 1) +
+  labs(title = "Proportion of oncontent by Country", x = "Country", y = "Proportion of oncontent") +
+  theme_minimal()
+
+```
+
+With the variable that measures sharing content on discrimination on social media the match does not seem that clear between the support and sharing content of that nature.
+
+#### Proportions of Suprights, schsexor, schtrans, and phone
+
+```{r}
+proportions_by_country <- df_final |> 
+  group_by(COUNTRY) |> 
+  summarize(
+    Suprights_prop = mean(suprights),
+    schsexor_prop = mean(schsexor),
+    schtrans_prop = mean(schtrans)
+  )
+
+# Reorder the levels of the COUNTRY factor based on Suprights_prop in descending order
+proportions_by_country <- proportions_by_country %>%
+  mutate(COUNTRY = factor(COUNTRY, levels = rev(COUNTRY[order(Suprights_prop)])))
+
+# Melt the data
+melted_data <- gather(proportions_by_country, key = "variable", value = "value", -COUNTRY)
+
+# Plotting
+ggplot(melted_data, aes(x = COUNTRY, y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Proportions of Suprights, schsexor and schtrans by Country", x = "Country", y = "Proportion", fill = "Variable") +
+  theme_minimal() +
+  theme(legend.position = "top") +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10))  # Wrap country names for better visualization
+
+```
+
+These relationship between three variables are consistent with the multivariate regression results and also with the heatmap visualization of the support for the policy. We can find that countries that have lower propensity to support the policy also tend to oppose LGTBQ rights, as well as the education on sex orientation and transgender matters in schools.
+
+#### Religion
+
+2=Orthodox Christian,
+
+7=Muslim-Sunny
+
+12=atheist,
+
+13=agnostic
+
+```{r}
+
+# Filter, summarize, and calculate proportion
+religion_share_by_country <- df_final %>%
+  filter(religion %in% c(2, 7, 12, 13)) %>%
+  group_by(COUNTRY, religion) %>%
+  summarize(count = n()) %>%
+  mutate(prop = count / sum(count)) %>%
+  arrange(desc(religion == 2), desc(prop))  # Arrange by decreasing share of religion 13
+
+# Rearrange levels of COUNTRY factor based on proportion of religion 13
+religion_share_by_country$COUNTRY <- factor(religion_share_by_country$COUNTRY, 
+                                            levels = unique(religion_share_by_country$COUNTRY))
+
+# Plot the share of religions 2, 7, 12 & 13 by country
+ggplot(religion_share_by_country, aes(x = COUNTRY, y = prop, fill = factor(religion))) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(title = "Share of Religions 2, 7, 12 & 13 by Country", x = "Country", y = "Proportion", fill = "Religion") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for better readability
+```
+
+The previous plot shows some interesting findings:
+
+-   Countries that have higher shares of Orthodox Christians are precisely those that tend to oppose the most the policy studied
+
+-   Higher levels of first agnosticism and then atheism are related to higher propensity to support the policy
+
+#### Phone
+
+```{r}
+phone_prop <- df_final |> 
+  group_by(COUNTRY) |> 
+  summarize(
+    phone_prop = mean(phone))
+
+phone_prop$COUNTRY <- factor(phone_prop$COUNTRY, levels = phone_prop$COUNTRY[order(phone_prop$phone_prop, decreasing = TRUE)])
+
+# Plotting for phone variable only
+ggplot(phone_prop, aes(x = COUNTRY, y = phone_prop)) +
+  geom_bar(stat = "identity", fill = "magenta4") +
+  labs(title = "Proportions of Phone Usage by Country", x = "Country", y = "Proportion") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for better readability
+
+```
+
+The share of people with a phone is very similar across countries and does not show a clear trend that can be clearly related to the support for the studied policy.
+
+#### GDP, Stability and Life expectancy
+
+**GDP by country**
+
+```{r}
+df_GDP <- df_final[, c("COUNTRY", "GDP")]
+
+df_GDP <- unique(df_GDP)
+
+
+df_GDP <- df_GDP[order(-df_GDP$GDP), ]
+
+# Plot the Stability by country
+library(ggplot2)
+ggplot(df_GDP, aes(x = reorder(COUNTRY, desc(GDP)), y = GDP)) +
+  geom_bar(stat = "identity", fill = "dodgerblue3") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(x = "Country", y = "GDP", title = "GDP by Country")
+
+```
+
+Here we can see a clear correlation between GDP and then the levels of support shown for the policy by country.
+
+**Stability by country**
+
+```{r}
+
+df_stability <- df_final[, c("COUNTRY", "Stability")]
+
+df_stability <- unique(df_stability)
+
+
+df_stability <- df_stability[order(-df_stability$Stability), ]
+
+# Plot the Stability by country
+library(ggplot2)
+ggplot(df_stability, aes(x = reorder(COUNTRY, desc(Stability)), y = Stability)) +
+  geom_bar(stat = "identity", fill = "chocolate") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(x = "Country", y = "Stability", title = "Stability by Country")
+
+```
+
+In this bar plot we can see how in general lines, again those countries with higher stability are the ones that show higher levels of support for the policy.
+
+**Life expectancy by country**
+
+```{r}
+
+df_lifeexp <- df_final[, c("COUNTRY", "lifexp")]
+
+df_lifeexp <- unique(df_lifeexp)
+
+
+df_lifeexp <- df_lifeexp[order(-df_lifeexp$lifexp), ]
+
+# Plot the life expectancy by country
+library(ggplot2)
+ggplot(df_lifeexp, aes(x = reorder(COUNTRY, desc(lifexp)), y = lifexp)) +
+  geom_bar(stat = "identity", fill = "darkolivegreen") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(x = "Country", y = "Life Expectancy", title = "Life Expectancy by Country")
+
+```
+
+As we can see in the plot the countries with higher life expectancy are also those that tend to support the policy more. This variable could also perhaps be seen as a development measure that determines support levels for more progresist policies.
+
+## Developing a Predictive Model
+
+2.  **Developing a Predictive Model for Other Countries**: This task involves building a model to predict support for transgender individuals changing civil documents to align with their gender identity. By using factors identified in the first part of the assignment, machine learning techniques will be applied to forecast support levels based on observed trends. To ensure the model’s accuracy and reliability, it must undergo thorough calibration and validation. Key steps in this process include selecting relevant features (variables), choosing an appropriate modeling method (such as regression analysis, decision trees, neural networks, etc.), training the model with survey data, and subsequently testing its predictions against known outcomes.
+
+Today, advocating for gender identity rights is a critical issue. One significant aspect of this advocacy is the ability of transgender individuals to change civil documents to align with their gender identity. To understand and predict the levels of support for such rights in various countries, machine learning techniques are employed. This task involves the development and evaluation of predictive models using factors identified in prior research. In this context, three predictive models - Logit, Random Forest, and LDA (Linear Discriminant Analysis) - have been developed and will be assessed for their efficacy in predicting support for transgender individuals' rights to change civil documents to align with their gender identity across different countries.
+
+#### Preparing the data
+
+```{r}
+set.seed(123)
+
+df_final$binary <- factor(df_final$policy_id==1, labels = c("FALSE", "TRUE"))
+table(df_final$binary)
+
+# Generate an index
+index <- createDataPartition(df_final$binary, p = 0.7, list = FALSE)
+
+# Subset the dataframe
+train <- df_final[index, ]
+test <- df_final[-index, ]
+
+# Check the train and test set
+table(train$binary)
+prop.table(table(train$binary))
+
+table(test$binary)
+prop.table(table(test$binary))
+```
+
+### Logistic Regression
+
+```{r}
+logit.model <- glm(binary ~  age + gender + community + ideo + class + none_min + oncontent + pubdef + campaign + workplace + suprights + schsexor + schtrans + occup + phone + religion + GDP + Stability + Unemployment + Gini + lifexp + edexp,
+                   family=binomial(link='logit'), data=train)
+
+summary(logit.model)
+```
+
+```{r}
+probability <- predict(logit.model, newdata=test, type='response')
+head(probability)
+
+prediction <- as.factor(ifelse(probability > 0.5, TRUE, FALSE))
+head(prediction)
+
+confusionMatrix(prediction, test$binary)$table
+confusionMatrix(prediction, test$binary)$overall[1:2]
+```
+
+### Random Forest
+
+```{r}
+# Run the classification model on the train set
+set.seed(123)
+rftrain <- randomForest(binary ~  age + gender + community + ideo + class + none_min + oncontent + pubdef + campaign + workplace + suprights + schsexor + schtrans + occup + phone + religion + GDP + Stability + Unemployment + Gini + lifexp + edexp, data=train, ntree=500)
+summary(rftrain)
+
+confusionMatrix(predict(rftrain, test), test$binary, positive = 'TRUE')
+```
+
+### Linear Discriminant Analysis (LDA)
+
+Let's check the structure of both train and test datasets to assign levels:
+
+```{r}
+str(train$binary)
+str(test$binary)
+```
+
+**The control function**
+
+```{r}
+#Specifying the parameters of the control function
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 10,
+                     classProbs = T,
+                     summaryFunction=twoClassSummary,
+                     verboseIter = T)
+
+#assigning levels
+levels(train$binary)=c("No","Yes")
+levels(test$binary)=c("No","Yes")
+```
+
+\`**The train function**
+
+```{r}
+#Hyper-parameters: Tuning parameter 'gamma' was held constant at a value of 1 
+param_grid = expand.grid(gamma = seq(1, 0.1), lambda = seq(0.1, 0.9, 0.1))
+
+#ROC is used to select the optimal model using the largest value
+
+ldaFit <- train(binary ~ ., 
+                method ="rda", 
+                data = train, 
+                tuneGrid = param_grid, 
+                preProcess = c("center", "scale"), 
+                metric="ROC", trControl = ctrl,  
+                positive = "Yes") 
+
+print(ldaFit)
+
+# Predict and validate
+ldaPred = predict(ldaFit, test)
+# Compute confusion matrix
+confusionMatrix(ldaPred, test$binary)
+```
+
+**Accuracy** is the proportion of correctly classified objects out of the total number of objects. In other words, it indicates how often the model is correct overall. On the other hand, **Cohen's Kappa** is a statistic that measures the agreement between the model's predictions and the actual labels, while accounting for the possibility of the agreement occurring by chance.
+
+Our interpretation for the models above is the following:
+
+-   The `logit` model's accuracy is around 75%. This means that out of all the predictions made by the model, around 75% of them were correct. Overall, this is a good model.
+
+-   The accuracy of the `Random Forest`model is approximately 77%. This indicates that about 77% of the predictions made by the model are correct. Sensitivity measures the proportion of actual positive cases that were correctly identified by the model. In this case, it's approximately 84%. Specificity measures the proportion of actual negative cases that were correctly identified by the model. In this case, it's approximately 67%. This seems like a better model than the previous.
+
+-   Finally, the `LDA` model seems like a better fit for our data. The accuracy of this model is around 85%, with higher specificity and sensitivity levels. Therefore, the LDA seems like the best model for predicting the levels of support towards the gender identity policy.
